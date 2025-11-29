@@ -661,6 +661,35 @@ button:not(:disabled):active {
   color: var(--muted);
 }
 
+.project-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: #0f172a;
+}
+
+.project-actions-left {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.project-actions-left small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.project-actions-right {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 @media (max-width: 960px) {
   #app {
     grid-template-columns: 1fr;
@@ -678,6 +707,10 @@ button:not(:disabled):active {
   }
   #app {
     padding: 12px;
+  }
+  .project-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
   .clip-item {
     grid-template-columns: 1fr;

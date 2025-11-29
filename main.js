@@ -11,6 +11,9 @@ const clipListEl = document.getElementById('clipList');
 const clipCountEl = document.getElementById('clipCount');
 const statusEl = document.getElementById('status');
 const downloadLink = document.getElementById('downloadLink');
+const btnImportProject = document.getElementById('btnImportProject');
+const btnExportProject = document.getElementById('btnExportProject');
+const projectFileInput = document.getElementById('projectFileInput');
 
 let displayStream = null;
 let micStream = null;
@@ -58,6 +61,87 @@ function revokeClipUrls() {
   clips.forEach(c => {
     if (c.url) URL.revokeObjectURL(c.url);
   });
+}
+
+async function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      console.log('Data URL info:', {
+        length: result.length,
+        header: result.substring(0, 100),
+        size: blob.size,
+        type: blob.type
+      });
+      resolve(result);
+    };
+    reader.onerror = () => reject(new Error('Failed to read blob'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function dataUrlToBlob(dataUrl) {
+  // Parse the data URL: data:[<mime>][;base64],<data>
+  if (!dataUrl.startsWith('data:')) {
+    throw new Error('Invalid data URL format');
+  }
+  
+  // Look for ";base64," or just "," to find the split point
+  let splitIndex = -1;
+  let isBase64 = false;
+  
+  const base64Marker = ';base64,';
+  const base64Index = dataUrl.indexOf(base64Marker);
+  
+  if (base64Index !== -1) {
+    // Found ";base64," marker
+    splitIndex = base64Index + base64Marker.length;
+    isBase64 = true;
+  } else {
+    // No base64, find the first comma after "data:"
+    splitIndex = dataUrl.indexOf(',', 5);
+    if (splitIndex === -1) {
+      throw new Error('Invalid data URL format - no comma found');
+    }
+    splitIndex += 1; // Move past the comma
+  }
+  
+  const header = dataUrl.substring(0, splitIndex - 1); // -1 to exclude the comma
+  const data = dataUrl.substring(splitIndex);
+  
+  // Extract MIME type
+  let mime = 'application/octet-stream';
+  if (isBase64) {
+    // Remove "data:" from start and ";base64" from end
+    mime = header.substring(5, header.length - 7); // 5 = "data:".length, 7 = ";base64".length
+  } else {
+    // Remove "data:" from start
+    mime = header.substring(5);
+  }
+  
+  console.log('Decoding data URL:', {
+    mime,
+    isBase64,
+    dataLength: data.length,
+    headerLength: header.length,
+    header: header.substring(0, 100)
+  });
+  
+  if (isBase64) {
+    // Decode base64 to binary
+    const binaryString = atob(data);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    console.log('Decoded first 4 bytes:', Array.from(bytes.slice(0, 4)).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+    return new Blob([bytes], { type: mime });
+  } else {
+    // URL encoded
+    const decoded = decodeURIComponent(data);
+    return new Blob([decoded], { type: mime });
+  }
 }
 
 // -----------------------------
@@ -214,23 +298,22 @@ function stopRecording() {
 // -----------------------------
 // Clips
 // -----------------------------
-function addClip(blob) {
+function addClip(blob, options = {}) {
   const url = URL.createObjectURL(blob);
-  const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
   const clip = {
-    id,
+    id: options.id || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
     blob,
     url,
-    duration: null,
-    trimStart: 0,
-    trimEnd: null
+    duration: Number.isFinite(options.duration) ? options.duration : null,
+    trimStart: Number.isFinite(options.trimStart) ? options.trimStart : 0,
+    trimEnd: Number.isFinite(options.trimEnd) ? options.trimEnd : null
   };
 
   clips.push(clip);
   clipCountEl.textContent = clips.length.toString();
-  renderClipList();
   btnExport.disabled = clips.length === 0;
+  renderClipList();
 
   // Load metadata to determine duration (robustly)
   loadVideoMetadata(url).then(meta => {
@@ -240,6 +323,9 @@ function addClip(blob) {
         clip.trimEnd = meta.duration;
       } else {
         clip.trimEnd = Math.min(clip.trimEnd, meta.duration);
+      }
+      if (clip.trimEnd <= clip.trimStart) {
+        clip.trimEnd = Math.min(meta.duration, clip.trimStart + 0.05);
       }
       renderClipList(); // update UI with duration
     }
@@ -274,6 +360,29 @@ function renderClipList() {
     vid.controls = true;
     vid.muted = true;
     vid.playsInline = true;
+    vid.preload = 'metadata';
+    
+    // Add error handling
+    vid.onerror = (e) => {
+      console.error('Video element error:', {
+        clipId: clip.id,
+        url: clip.url,
+        blobSize: clip.blob?.size,
+        blobType: clip.blob?.type,
+        error: e,
+        videoError: vid.error
+      });
+    };
+    
+    vid.onloadedmetadata = () => {
+      console.log('Video loaded successfully:', {
+        clipId: clip.id,
+        duration: vid.duration,
+        videoWidth: vid.videoWidth,
+        videoHeight: vid.videoHeight
+      });
+    };
+    
     thumb.appendChild(vid);
 
     // Trim overlay
@@ -561,6 +670,160 @@ function renderClipList() {
     // Initial paint for trim overlay
     refreshClipUI();
   });
+}
+
+// -----------------------------
+// Project save/load
+// -----------------------------
+function resetDownloadLink() {
+  downloadLink.style.display = 'none';
+  downloadLink.removeAttribute('href');
+  downloadLink.textContent = 'Download final webm';
+}
+
+async function exportProject() {
+  if (!clips.length) {
+    statusEl.textContent = 'No clips to export as a project.';
+    return;
+  }
+
+  try {
+    statusEl.textContent = 'Preparing project export…';
+
+    const serializedClips = [];
+    for (let i = 0; i < clips.length; i++) {
+      statusEl.textContent = `Encoding clip ${i + 1}/${clips.length}…`;
+      const clip = clips[i];
+      
+      // Log original blob info
+      const testBytes = new Uint8Array(await clip.blob.slice(0, 4).arrayBuffer());
+      console.log('Exporting clip - first 4 bytes:', {
+        index: i,
+        id: clip.id,
+        bytes: Array.from(testBytes).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '),
+        size: clip.blob.size,
+        type: clip.blob.type
+      });
+      
+      const dataUrl = await blobToDataUrl(clip.blob);
+      
+      console.log('Data URL being saved:', {
+        index: i,
+        id: clip.id,
+        urlPrefix: dataUrl.substring(0, 60),
+        hasBase64: dataUrl.includes(';base64'),
+        endsWithBase64: dataUrl.substring(0, 100).includes(';base64')
+      });
+
+      serializedClips.push({
+        id: clip.id,
+        mimeType: clip.blob.type || 'video/webm',
+        duration: clip.duration,
+        trimStart: Number.isFinite(clip.trimStart) ? clip.trimStart : 0,
+        trimEnd: Number.isFinite(clip.trimEnd) ? clip.trimEnd : null,
+        dataUrl
+      });
+    }
+
+    const payload = {
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      clipCount: serializedClips.length,
+      clips: serializedClips
+    };
+
+    const jsonString = JSON.stringify(payload);
+    console.log('JSON export check:', {
+      jsonLength: jsonString.length,
+      firstClipDataUrlStart: jsonString.indexOf('"dataUrl":"') > -1 
+        ? jsonString.substring(jsonString.indexOf('"dataUrl":"'), jsonString.indexOf('"dataUrl":"') + 100)
+        : 'not found'
+    });
+
+    const fileBlob = new Blob([jsonString], { type: 'application/json' });
+    const url = URL.createObjectURL(fileBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'screen-recorder-project.json';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+    statusEl.textContent = 'Project exported.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Project export failed: ' + err.message;
+  }
+}
+
+async function importProjectFile(file) {
+  if (!file) return;
+  try {
+    statusEl.textContent = 'Loading project…';
+    const text = await file.text();
+    console.log('File text length:', text.length);
+    console.log('First 200 chars:', text.substring(0, 200));
+    
+    const data = JSON.parse(text);
+
+    if (!data || !Array.isArray(data.clips)) {
+      throw new Error('Invalid project file');
+    }
+    
+    console.log('Parsed clips:', {
+      count: data.clips.length,
+      firstClipDataUrlLength: data.clips[0]?.dataUrl?.length,
+      firstClipDataUrlStart: data.clips[0]?.dataUrl?.substring(0, 100)
+    });
+
+    revokeClipUrls();
+    clips.length = 0;
+    clipCountEl.textContent = '0';
+    btnExport.disabled = true;
+    resetDownloadLink();
+    renderClipList();
+
+    for (let i = 0; i < data.clips.length; i++) {
+      const entry = data.clips[i];
+      if (!entry || !entry.dataUrl) continue;
+      
+      statusEl.textContent = `Restoring clip ${i + 1}/${data.clips.length}…`;
+      let blob = await dataUrlToBlob(entry.dataUrl);
+      
+      // Use the stored MIME type if available (preserves codec info)
+      if (entry.mimeType && entry.mimeType !== blob.type) {
+        blob = new Blob([blob], { type: entry.mimeType });
+      }
+      
+      console.log('Imported clip blob:', {
+        index: i,
+        id: entry.id,
+        size: blob.size,
+        type: blob.type,
+        storedType: entry.mimeType
+      });
+      
+      // Test if blob is valid by checking first bytes
+      const testBytes = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+      console.log('First 4 bytes of imported blob:', Array.from(testBytes).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+      
+      addClip(blob, {
+        id: entry.id,
+        duration: Number.isFinite(entry.duration) ? entry.duration : null,
+        trimStart: Number.isFinite(entry.trimStart) ? entry.trimStart : 0,
+        trimEnd: Number.isFinite(entry.trimEnd) ? entry.trimEnd : null
+      });
+    }
+
+    statusEl.textContent = `Project imported with ${clips.length} clip${clips.length === 1 ? '' : 's'}.`;
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Project import failed: ' + err.message;
+  } finally {
+    projectFileInput.value = '';
+  }
 }
 
 // -----------------------------
@@ -910,6 +1173,17 @@ async function exportFinalVideo() {
 btnStartCapture.addEventListener('click', startCapture);
 btnStartRecording.addEventListener('click', startRecording);
 btnExport.addEventListener('click', exportFinalVideo);
+btnExportProject.addEventListener('click', exportProject);
+btnImportProject.addEventListener('click', () => {
+  projectFileInput.value = '';
+  projectFileInput.click();
+});
+projectFileInput.addEventListener('change', () => {
+  const file = projectFileInput.files && projectFileInput.files[0];
+  if (file) {
+    importProjectFile(file);
+  }
+});
 
 window.addEventListener('beforeunload', () => {
   revokeClipUrls();
