@@ -23,6 +23,7 @@ let recordedChunks = [];
 let currentMimeType = '';
 let isRecording = false;
 let stopOverlay = null;
+let dragSourceClipId = null;
 
 const clips = []; // { id, blob, url, duration, trimStart, trimEnd }
 
@@ -300,11 +301,15 @@ function stopRecording() {
 // -----------------------------
 function addClip(blob, options = {}) {
   const url = URL.createObjectURL(blob);
+  const defaultTitle = (typeof options.title === 'string' && options.title.trim())
+    ? options.title.trim()
+    : `Clip ${clips.length + 1}`;
 
   const clip = {
     id: options.id || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
     blob,
     url,
+    title: defaultTitle,
     duration: Number.isFinite(options.duration) ? options.duration : null,
     trimStart: Number.isFinite(options.trimStart) ? options.trimStart : 0,
     trimEnd: Number.isFinite(options.trimEnd) ? options.trimEnd : null
@@ -350,6 +355,109 @@ function renderClipList() {
     const item = document.createElement('div');
     item.className = 'clip-item';
     item.dataset.id = clip.id;
+
+    const header = document.createElement('div');
+    header.className = 'clip-header';
+
+    const headerLeft = document.createElement('div');
+    headerLeft.className = 'clip-header-left';
+
+    const indexPill = document.createElement('div');
+    indexPill.className = 'index-pill';
+    indexPill.textContent = `#${index + 1}`;
+    indexPill.draggable = true;
+
+    const btnGroup = document.createElement('div');
+    btnGroup.className = 'btn-group';
+
+    const btnUp = document.createElement('button');
+    btnUp.className = 'secondary small round';
+    btnUp.type = 'button';
+    btnUp.textContent = '↑';
+    btnUp.disabled = index === 0;
+
+    const btnDown = document.createElement('button');
+    btnDown.className = 'secondary small round';
+    btnDown.type = 'button';
+    btnDown.textContent = '↓';
+    btnDown.disabled = index === clips.length - 1;
+
+    const btnDelete = document.createElement('button');
+    btnDelete.className = 'danger small round';
+    btnDelete.type = 'button';
+    btnDelete.textContent = '×';
+
+    btnGroup.appendChild(btnUp);
+    btnGroup.appendChild(btnDown);
+    btnGroup.appendChild(btnDelete);
+
+    headerLeft.appendChild(indexPill);
+    headerLeft.appendChild(btnGroup);
+
+    const headerRight = document.createElement('div');
+    headerRight.className = 'clip-header-right';
+
+    const titleInput = document.createElement('input');
+    titleInput.type = 'text';
+    titleInput.className = 'clip-title-input';
+    titleInput.placeholder = 'Clip title';
+    const fallbackTitle = `Clip ${index + 1}`;
+    titleInput.value = clip.title && clip.title.trim() ? clip.title : fallbackTitle;
+    titleInput.addEventListener('input', () => {
+      const nextTitle = titleInput.value.trim();
+      clip.title = nextTitle || fallbackTitle;
+    });
+    titleInput.addEventListener('blur', () => {
+      if (!titleInput.value.trim()) {
+        clip.title = fallbackTitle;
+        titleInput.value = fallbackTitle;
+      }
+    });
+    headerRight.appendChild(titleInput);
+
+    header.appendChild(headerLeft);
+    header.appendChild(headerRight);
+    item.appendChild(header);
+
+    indexPill.addEventListener('dragstart', (e) => {
+      dragSourceClipId = clip.id;
+      item.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', clip.id);
+      }
+    });
+
+    indexPill.addEventListener('dragend', () => {
+      dragSourceClipId = null;
+      item.classList.remove('dragging');
+      document.querySelectorAll('.clip-item').forEach(el => el.classList.remove('drag-over'));
+    });
+
+    item.addEventListener('dragover', (e) => {
+      if (!dragSourceClipId || dragSourceClipId === clip.id) return;
+      e.preventDefault();
+      item.classList.add('drag-over');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+
+    item.addEventListener('dragleave', () => {
+      item.classList.remove('drag-over');
+    });
+
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      if (!dragSourceClipId || dragSourceClipId === clip.id) return;
+      const from = clips.findIndex(c => c.id === dragSourceClipId);
+      const to = clips.findIndex(c => c.id === clip.id);
+      if (from !== -1 && to !== -1 && from !== to) {
+        const [moved] = clips.splice(from, 1);
+        clips.splice(to, 0, moved);
+        renderClipList();
+      }
+      dragSourceClipId = null;
+    });
 
     // Thumbnail
     const thumb = document.createElement('div');
@@ -417,7 +525,7 @@ function renderClipList() {
     // Meta + controls container below the video
     const infoWrap = document.createElement('div');
     infoWrap.style.display = 'grid';
-    infoWrap.style.gridTemplateColumns = '1fr 1fr 1fr';
+    infoWrap.style.gridTemplateColumns = '1fr 1fr';
     infoWrap.style.gap = '10px';
     infoWrap.style.alignItems = 'center';
 
@@ -428,7 +536,7 @@ function renderClipList() {
     row1.className = 'row';
     const label1 = document.createElement('div');
     label1.className = 'label';
-    label1.textContent = `Clip ${index + 1}`;
+    label1.textContent = 'Length:';
     const value1 = document.createElement('div');
     value1.className = 'value';
     value1.textContent = clip.duration
@@ -486,45 +594,10 @@ function renderClipList() {
     controls.appendChild(labelStart);
     controls.appendChild(labelEnd);
 
-    // Actions section moved to bottom
-    const actions = document.createElement('div');
-    actions.className = 'clip-actions';
-
-    const indexPill = document.createElement('div');
-    indexPill.className = 'index-pill';
-    indexPill.textContent = `#${index + 1}`;
-    actions.appendChild(indexPill);
-
-    const btnGroup = document.createElement('div');
-    btnGroup.className = 'btn-group';
-
-    const btnUp = document.createElement('button');
-    btnUp.className = 'secondary small round';
-    btnUp.type = 'button';
-    btnUp.textContent = '↑';
-    btnUp.disabled = index === 0;
-
-    const btnDown = document.createElement('button');
-    btnDown.className = 'secondary small round';
-    btnDown.type = 'button';
-    btnDown.textContent = '↓';
-    btnDown.disabled = index === clips.length - 1;
-
-    const btnDelete = document.createElement('button');
-    btnDelete.className = 'danger small round';
-    btnDelete.type = 'button';
-    btnDelete.textContent = '×';
-
-    btnGroup.appendChild(btnUp);
-    btnGroup.appendChild(btnDown);
-    btnGroup.appendChild(btnDelete);
-    actions.appendChild(btnGroup);
-
     item.appendChild(thumb);
     infoWrap.appendChild(meta);
     infoWrap.appendChild(controls);
     item.appendChild(infoWrap);
-    item.appendChild(actions);
 
     const refreshClipUI = () => {
       const dur = Number.isFinite(clip.duration) ? clip.duration : null;
@@ -756,6 +829,7 @@ async function exportProject() {
 
       serializedClips.push({
         id: clip.id,
+        title: clip.title,
         mimeType: clip.blob.type || 'video/webm',
         duration: clip.duration,
         trimStart: Number.isFinite(clip.trimStart) ? clip.trimStart : 0,
@@ -850,6 +924,7 @@ async function importProjectFile(file) {
       
       addClip(blob, {
         id: entry.id,
+        title: typeof entry.title === 'string' ? entry.title : undefined,
         duration: Number.isFinite(entry.duration) ? entry.duration : null,
         trimStart: Number.isFinite(entry.trimStart) ? entry.trimStart : 0,
         trimEnd: Number.isFinite(entry.trimEnd) ? entry.trimEnd : null
