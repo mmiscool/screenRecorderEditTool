@@ -181,7 +181,8 @@ async function startCapture() {
     btnStartRecording.disabled = false;
 
     setCaptureStatus('live');
-    statusEl.textContent = 'Capture ready. Hit “Start Clip” to record.';
+    statusEl.textContent = 'Capture ready. Recording first clip…';
+    startRecording();
   } catch (err) {
     console.error(err);
     statusEl.textContent = 'Failed to start capture: ' + err.message;
@@ -512,9 +513,9 @@ function renderClipList() {
     const playhead = document.createElement('div');
     playhead.className = 'trim-playhead';
     const handleStart = document.createElement('div');
-    handleStart.className = 'trim-handle';
+    handleStart.className = 'trim-handle trim-handle-start';
     const handleEnd = document.createElement('div');
-    handleEnd.className = 'trim-handle';
+    handleEnd.className = 'trim-handle trim-handle-end';
     bar.appendChild(fill);
     bar.appendChild(playhead);
     bar.appendChild(handleStart);
@@ -1266,9 +1267,10 @@ async function exportFinalVideo() {
 
     downloadLink.href = url;
     downloadLink.style.display = 'inline-flex';
-    downloadLink.textContent = 'Download final webm';
+    downloadLink.textContent = 'Download started automatically (click to download again)';
+    downloadLink.click();
 
-    statusEl.textContent = 'Done. Download your final video.';
+    statusEl.textContent = 'Done. Final video is downloading.';
   } catch (err) {
     console.error(err);
     statusEl.textContent = 'Export failed: ' + err.message;
