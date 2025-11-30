@@ -220,6 +220,15 @@ button:disabled {
   background: var(--panel-soft);
 }
 
+#webcamPiP {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-100%, -100%);
+}
+
 .preview-overlay {
   position: absolute;
   inset: 0;

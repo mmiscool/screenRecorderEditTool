@@ -14,6 +14,8 @@ const downloadLink = document.getElementById('downloadLink');
 const btnImportProject = document.getElementById('btnImportProject');
 const btnExportProject = document.getElementById('btnExportProject');
 const projectFileInput = document.getElementById('projectFileInput');
+const btnWebcamPiP = document.getElementById('btnWebcamPiP');
+const webcamPiPVideo = document.getElementById('webcamPiP');
 
 let displayStream = null;
 let micStream = null;
@@ -24,6 +26,7 @@ let currentMimeType = '';
 let isRecording = false;
 let stopOverlay = null;
 let dragSourceClipId = null;
+let webcamStream = null;
 
 const clips = []; // { id, blob, url, duration, trimStart, trimEnd }
 
@@ -216,6 +219,65 @@ function stopCapture() {
   updateRecordingIndicator();
   setCaptureStatus('idle');
   statusEl.textContent = 'Capture stopped.';
+}
+
+function setWebcamPiPButtonState(active) {
+  btnWebcamPiP.textContent = active ? 'Close Webcam PiP' : 'Webcam PiP';
+}
+
+function cleanupWebcamStream() {
+  stopAllTracks(webcamStream);
+  webcamStream = null;
+  if (webcamPiPVideo) {
+    webcamPiPVideo.srcObject = null;
+  }
+}
+
+async function toggleWebcamPiP() {
+  if (!('pictureInPictureEnabled' in document) || !document.pictureInPictureEnabled) {
+    statusEl.textContent = 'Picture-in-Picture is not supported in this browser.';
+    return;
+  }
+
+  btnWebcamPiP.disabled = true;
+  try {
+    if (document.pictureInPictureElement === webcamPiPVideo) {
+      await document.exitPictureInPicture();
+      cleanupWebcamStream();
+      setWebcamPiPButtonState(false);
+      statusEl.textContent = 'Webcam PiP closed.';
+      return;
+    }
+
+    if (!webcamStream) {
+      statusEl.textContent = 'Requesting webcam for PiP…';
+      webcamStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: false
+      });
+      webcamPiPVideo.srcObject = webcamStream;
+      webcamPiPVideo.muted = true;
+      await webcamPiPVideo.play();
+    }
+
+    await webcamPiPVideo.requestPictureInPicture();
+    setWebcamPiPButtonState(true);
+    statusEl.textContent = 'Webcam is in Picture-in-Picture.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Webcam PiP failed: ' + err.message;
+    cleanupWebcamStream();
+  } finally {
+    btnWebcamPiP.disabled = false;
+  }
+}
+
+function stopWebcamPiP() {
+  if (document.pictureInPictureElement === webcamPiPVideo) {
+    document.exitPictureInPicture().catch(() => {});
+  }
+  cleanupWebcamStream();
+  setWebcamPiPButtonState(false);
 }
 
 function selectMimeType() {
@@ -1300,13 +1362,21 @@ projectFileInput.addEventListener('change', () => {
     importProjectFile(file);
   }
 });
+btnWebcamPiP.addEventListener('click', toggleWebcamPiP);
+webcamPiPVideo.addEventListener('leavepictureinpicture', () => {
+  cleanupWebcamStream();
+  setWebcamPiPButtonState(false);
+  statusEl.textContent = 'Webcam PiP closed.';
+});
 
 window.addEventListener('beforeunload', () => {
   revokeClipUrls();
   stopCapture();
+  stopWebcamPiP();
 });
 
 // Initial UI
 renderClipList();
 setCaptureStatus('idle');
 updateRecordingIndicator();
+setWebcamPiPButtonState(false);
