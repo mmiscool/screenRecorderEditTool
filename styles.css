@@ -732,6 +732,36 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.page-shell {
+  width: 100%;
+  max-width: 1200px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.repo-footer {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding-top: 4px;
+}
+
+.project-repo-link {
+  font-size: 15px;
+  font-weight: 600;
+  color: LinkText;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.project-repo-link:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 960px) {
   #app {
     grid-template-columns: 1fr;
