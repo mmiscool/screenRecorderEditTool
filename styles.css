@@ -706,6 +706,96 @@ button:disabled {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.title-preview {
+  position: relative;
+  width: 100%;
+  min-height: 160px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-soft);
+}
+
+.title-preview-text {
+  width: 100%;
+  padding: 14px 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-shadow: 0 2px 12px color-mix(in srgb, CanvasText 45%, transparent);
+  box-sizing: border-box;
+}
+
+
+.title-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.title-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.title-controls textarea,
+.title-controls input,
+.title-controls select {
+  background: var(--input-bg);
+  border-radius: 8px;
+  border: 1px solid var(--input-border);
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text);
+  outline: none;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.title-controls textarea:focus,
+.title-controls input:focus,
+.title-controls select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.title-text-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.title-textarea-wrap textarea {
+  width: 100%;
+  min-height: 90px;
+}
+
+.title-duration-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.title-bg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
 /* Export panel */
 .export-panel {
   background: var(--panel);

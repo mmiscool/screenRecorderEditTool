@@ -16,6 +16,8 @@ const btnImportProject = document.getElementById('btnImportProject');
 const btnExportProject = document.getElementById('btnExportProject');
 const clipFileInput = document.getElementById('clipFileInput');
 const projectFileInput = document.getElementById('projectFileInput');
+const btnAddTitleClip = document.getElementById('btnAddTitleClip');
+const titleBgFileInput = document.getElementById('titleBgFileInput');
 const btnWebcamPiP = document.getElementById('btnWebcamPiP');
 const webcamPiPVideo = document.getElementById('webcamPiP');
 const audioOffsetInput = document.getElementById('audioOffsetInput');
@@ -37,8 +39,16 @@ let captureAudioCtx = null;
 let micSourceNode = null;
 let micDelayNode = null;
 let micDestNode = null;
+let pendingBgTargetId = null;
 
-const clips = []; // { id, blob, url, duration, trimStart, trimEnd }
+const baseFontOptions = [
+  { label: 'Sans (Inter)', value: 'Inter, system-ui, sans-serif' },
+  { label: 'Serif (Georgia)', value: 'Georgia, serif' },
+  { label: 'Mono (Courier New)', value: '"Courier New", monospace' }
+];
+let availableFontOptions = [...baseFontOptions];
+
+const clips = []; // { id, type, blob?, url?, duration, trimStart, trimEnd, ... }
 
 // Export pipeline (canvas + MediaRecorder)
 let exportRecording = false;
@@ -46,7 +56,49 @@ let exportRecording = false;
 // -----------------------------
 // Helpers
 // -----------------------------
+import { fontDetectionCandidates } from './fontDetectionCandidates.js';
+
 const sleep = ms => new Promise(res => setTimeout(res, ms));
+
+function dedupeFontOptions(list) {
+  const seen = new Set();
+  const result = [];
+  for (const opt of list) {
+    const key = (opt.value || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(opt);
+  }
+  return result;
+}
+
+async function detectAvailableFonts(candidates) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return [];
+
+  const sample = 'AaBbCcDdEeFfGg1234567890';
+  const measure = (font) => {
+    ctx.font = `32px ${font}`;
+    return ctx.measureText(sample).width;
+  };
+
+  const baselines = {
+    serif: measure('serif'),
+    sans: measure('sans-serif'),
+    mono: measure('monospace')
+  };
+
+  const available = [];
+  for (const name of candidates) {
+    const testFont = `'${name}', sans-serif`;
+    const width = measure(testFont);
+    if (width !== baselines.serif && width !== baselines.sans && width !== baselines.mono) {
+      available.push({ label: name, value: `${name}, sans-serif` });
+    }
+  }
+  return available;
+}
 
 function setCaptureStatus(mode) {
   // mode: 'idle' | 'live' | 'recording'
@@ -481,6 +533,7 @@ function addClip(blob, options = {}) {
     : `Clip ${clips.length + 1}`;
 
   const clip = {
+    type: 'video',
     id: options.id || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
     blob,
     url,
@@ -514,6 +567,38 @@ function addClip(blob, options = {}) {
   });
 }
 
+function addTitleClip(options = {}) {
+  const duration = Number.isFinite(options.duration) ? Math.max(0.1, options.duration) : 3;
+  const trimStart = Number.isFinite(options.trimStart) ? Math.max(0, options.trimStart) : 0;
+  const trimEnd = Number.isFinite(options.trimEnd)
+    ? Math.max(trimStart + 0.01, options.trimEnd)
+    : duration;
+  const fallbackTitle = `Title Block ${clips.length + 1}`;
+  const clip = {
+    type: 'title',
+    id: options.id || `${Date.now()}_${Math.random().toString(36).slice(2)}`,
+    title: (typeof options.title === 'string' && options.title.trim()) ? options.title.trim() : fallbackTitle,
+    duration,
+    trimStart,
+    trimEnd,
+    text: typeof options.text === 'string' ? options.text : '',
+    textColor: options.textColor || '#ffffff',
+    textSize: Number.isFinite(options.textSize) ? Math.max(8, options.textSize) : 48,
+    textAlign: options.textAlign || 'center',
+    fontFamily: options.fontFamily || 'Inter, system-ui, sans-serif',
+    bgDataUrl: options.bgDataUrl || null,
+    bgMimeType: options.bgMimeType || null,
+    backgroundFit: options.backgroundFit || 'cover'
+  };
+
+  clips.push(clip);
+  clipCountEl.textContent = clips.length.toString();
+  btnExport.disabled = clips.length === 0;
+  renderClipList();
+  statusEl.textContent = 'Added title block.';
+  return clip;
+}
+
 function renderClipList() {
   clipListEl.innerHTML = '';
 
@@ -521,7 +606,7 @@ function renderClipList() {
     const empty = document.createElement('div');
     empty.style.fontSize = '11px';
     empty.style.color = 'var(--muted)';
-    empty.textContent = 'No clips yet. Record at least one clip to edit.';
+    empty.textContent = 'No clips yet. Record, import, or add a title block to start.';
     clipListEl.appendChild(empty);
     return;
   }
@@ -576,7 +661,7 @@ function renderClipList() {
     titleInput.type = 'text';
     titleInput.className = 'clip-title-input';
     titleInput.placeholder = 'Clip title';
-    const fallbackTitle = `Clip ${index + 1}`;
+    const fallbackTitle = clip.type === 'title' ? `Title ${index + 1}` : `Clip ${index + 1}`;
     titleInput.value = clip.title && clip.title.trim() ? clip.title : fallbackTitle;
     titleInput.addEventListener('input', () => {
       const nextTitle = titleInput.value.trim();
@@ -633,6 +718,238 @@ function renderClipList() {
       }
       dragSourceClipId = null;
     });
+
+    const attachCommonControls = () => {
+      btnUp.addEventListener('click', () => {
+        if (index === 0) return;
+        const tmp = clips[index - 1];
+        clips[index - 1] = clips[index];
+        clips[index] = tmp;
+        renderClipList();
+      });
+
+      btnDown.addEventListener('click', () => {
+        if (index === clips.length - 1) return;
+        const tmp = clips[index + 1];
+        clips[index + 1] = clips[index];
+        clips[index] = tmp;
+        renderClipList();
+      });
+
+      btnDelete.addEventListener('click', () => {
+        const idx = clips.findIndex(c => c.id === clip.id);
+        if (idx !== -1) {
+          if (clips[idx].url) URL.revokeObjectURL(clips[idx].url);
+          clips.splice(idx, 1);
+        }
+        clipCountEl.textContent = clips.length.toString();
+        btnExport.disabled = clips.length === 0;
+        renderClipList();
+      });
+    };
+
+    if (clip.type === 'title') {
+      const preview = document.createElement('div');
+      preview.className = 'title-preview';
+      preview.style.backgroundImage = clip.bgDataUrl ? `url(${clip.bgDataUrl})` : 'none';
+      preview.style.backgroundSize = clip.backgroundFit === 'contain' ? 'contain' : 'cover';
+      preview.style.backgroundPosition = 'center';
+      preview.style.backgroundRepeat = 'no-repeat';
+      preview.style.backgroundColor = clip.bgDataUrl ? 'transparent' : 'var(--panel-soft)';
+
+      const previewText = document.createElement('div');
+      previewText.className = 'title-preview-text';
+      previewText.textContent = clip.text || '';
+      const initialAlign = ['left', 'center', 'right'].includes(clip.textAlign)
+        ? clip.textAlign
+        : 'center';
+      clip.textAlign = initialAlign;
+      previewText.style.color = clip.textColor || '#ffffff';
+      previewText.style.fontSize = `${Number.isFinite(clip.textSize) ? clip.textSize : 48}px`;
+      previewText.style.textAlign = initialAlign;
+      previewText.style.fontFamily = clip.fontFamily || 'Inter, system-ui, sans-serif';
+      preview.appendChild(previewText);
+
+      const controls = document.createElement('div');
+      controls.className = 'title-controls';
+
+      const settingsRow = document.createElement('div');
+      settingsRow.className = 'title-text-settings';
+
+      const fontLabel = document.createElement('label');
+      fontLabel.textContent = 'Font';
+      const fontSelect = document.createElement('select');
+      const fontOptions = (() => {
+        const opts = dedupeFontOptions([
+          ...availableFontOptions,
+          ...(clip.fontFamily ? [{ label: clip.fontFamily, value: clip.fontFamily }] : [])
+        ]);
+        if (!opts.length) return baseFontOptions;
+        return opts;
+      })();
+
+      fontOptions.forEach(opt => {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.label;
+        if (clip.fontFamily === opt.value) o.selected = true;
+        fontSelect.appendChild(o);
+      });
+      if (clip.fontFamily && !Array.from(fontSelect.options).some(o => o.value === clip.fontFamily)) {
+        const custom = document.createElement('option');
+        custom.value = clip.fontFamily;
+        custom.textContent = clip.fontFamily;
+        custom.selected = true;
+        fontSelect.appendChild(custom);
+      }
+      fontSelect.addEventListener('change', () => {
+        clip.fontFamily = fontSelect.value;
+        previewText.style.fontFamily = clip.fontFamily;
+      });
+      fontLabel.appendChild(fontSelect);
+
+      const sizeLabel = document.createElement('label');
+      sizeLabel.textContent = 'Size (px)';
+      const sizeInput = document.createElement('input');
+      sizeInput.type = 'number';
+      sizeInput.min = '8';
+      sizeInput.step = '2';
+      sizeInput.value = (Number.isFinite(clip.textSize) ? clip.textSize : 48).toString();
+      sizeInput.addEventListener('change', () => {
+        const next = Math.max(8, parseInt(sizeInput.value, 10) || 8);
+        clip.textSize = next;
+        previewText.style.fontSize = `${next}px`;
+        sizeInput.value = next.toString();
+      });
+      sizeLabel.appendChild(sizeInput);
+
+      const colorLabel = document.createElement('label');
+      colorLabel.textContent = 'Text color';
+      const colorInput = document.createElement('input');
+      colorInput.type = 'color';
+      const safeColor = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(clip.textColor || '')
+        ? clip.textColor
+        : '#ffffff';
+      colorInput.value = safeColor;
+      clip.textColor = safeColor;
+      colorInput.addEventListener('input', () => {
+        clip.textColor = colorInput.value;
+        previewText.style.color = clip.textColor;
+      });
+      colorLabel.appendChild(colorInput);
+
+      const alignLabel = document.createElement('label');
+      alignLabel.textContent = 'Alignment';
+      const alignSelect = document.createElement('select');
+      ['left', 'center', 'right'].forEach(val => {
+        const o = document.createElement('option');
+        o.value = val;
+        o.textContent = val.charAt(0).toUpperCase() + val.slice(1);
+        if (clip.textAlign === val) o.selected = true;
+        alignSelect.appendChild(o);
+      });
+      const validAligns = ['left', 'center', 'right'];
+      if (!validAligns.includes(clip.textAlign)) {
+        clip.textAlign = 'center';
+      }
+      alignSelect.value = clip.textAlign;
+      alignSelect.addEventListener('change', () => {
+        clip.textAlign = alignSelect.value;
+        previewText.style.textAlign = clip.textAlign;
+      });
+      alignLabel.appendChild(alignSelect);
+
+      settingsRow.appendChild(fontLabel);
+      settingsRow.appendChild(sizeLabel);
+      settingsRow.appendChild(colorLabel);
+      settingsRow.appendChild(alignLabel);
+
+      const textLabel = document.createElement('label');
+      textLabel.textContent = 'Text';
+      textLabel.className = 'title-textarea-wrap';
+      const textArea = document.createElement('textarea');
+      textArea.value = clip.text || '';
+      textArea.placeholder = 'Title text';
+      textArea.rows = 4;
+      textArea.addEventListener('input', () => {
+        clip.text = textArea.value;
+        previewText.textContent = clip.text || '';
+      });
+      textLabel.appendChild(textArea);
+
+      const durationRow = document.createElement('div');
+      durationRow.className = 'title-duration-row';
+      const durationLabel = document.createElement('label');
+      durationLabel.textContent = 'Duration (s)';
+      const durationInput = document.createElement('input');
+      durationInput.type = 'number';
+      durationInput.min = '0.1';
+      durationInput.step = '0.1';
+      durationInput.value = (Number.isFinite(clip.duration) ? clip.duration : 3).toFixed(1);
+      durationInput.addEventListener('change', () => {
+        const next = Math.max(0.1, parseFloat(durationInput.value) || 0);
+        clip.duration = next;
+        clip.trimEnd = next;
+        durationInput.value = next.toFixed(1);
+      });
+      durationLabel.appendChild(durationInput);
+      durationRow.appendChild(durationLabel);
+
+      const bgLabel = document.createElement('label');
+      bgLabel.textContent = 'Background image';
+      const bgButtons = document.createElement('div');
+      bgButtons.className = 'title-bg-actions';
+      const setBgBtn = document.createElement('button');
+      setBgBtn.type = 'button';
+      setBgBtn.className = 'secondary small';
+      setBgBtn.textContent = clip.bgDataUrl ? 'Replace background' : 'Set background';
+      setBgBtn.addEventListener('click', () => {
+        pendingBgTargetId = clip.id;
+        titleBgFileInput.value = '';
+        titleBgFileInput.click();
+      });
+      const clearBgBtn = document.createElement('button');
+      clearBgBtn.type = 'button';
+      clearBgBtn.className = 'secondary small';
+      clearBgBtn.textContent = 'Clear';
+      clearBgBtn.disabled = !clip.bgDataUrl;
+      clearBgBtn.addEventListener('click', () => {
+        clip.bgDataUrl = null;
+        clip.bgMimeType = null;
+        preview.style.backgroundImage = 'none';
+        clearBgBtn.disabled = true;
+        setBgBtn.textContent = 'Set background';
+      });
+
+      const fitSelect = document.createElement('select');
+      ['cover', 'contain'].forEach(val => {
+        const o = document.createElement('option');
+        o.value = val;
+        o.textContent = val.charAt(0).toUpperCase() + val.slice(1);
+        if (clip.backgroundFit === val) o.selected = true;
+        fitSelect.appendChild(o);
+      });
+      fitSelect.addEventListener('change', () => {
+        clip.backgroundFit = fitSelect.value;
+        preview.style.backgroundSize = clip.backgroundFit === 'contain' ? 'contain' : 'cover';
+      });
+
+      bgButtons.appendChild(setBgBtn);
+      bgButtons.appendChild(clearBgBtn);
+      bgButtons.appendChild(fitSelect);
+      bgLabel.appendChild(bgButtons);
+
+      controls.appendChild(settingsRow);
+      controls.appendChild(textLabel);
+      controls.appendChild(durationRow);
+      controls.appendChild(bgLabel);
+
+      item.appendChild(preview);
+      item.appendChild(controls);
+      attachCommonControls();
+      clipListEl.appendChild(item);
+      return;
+    }
 
     // Thumbnail
     const thumb = document.createElement('div');
@@ -925,33 +1242,7 @@ function renderClipList() {
     vid.addEventListener('timeupdate', updatePlayhead);
     vid.addEventListener('seeked', updatePlayhead);
 
-    btnUp.addEventListener('click', () => {
-      if (index === 0) return;
-      const tmp = clips[index - 1];
-      clips[index - 1] = clips[index];
-      clips[index] = tmp;
-      renderClipList();
-    });
-
-    btnDown.addEventListener('click', () => {
-      if (index === clips.length - 1) return;
-      const tmp = clips[index + 1];
-      clips[index + 1] = clips[index];
-      clips[index] = tmp;
-      renderClipList();
-    });
-
-    btnDelete.addEventListener('click', () => {
-      const idx = clips.findIndex(c => c.id === clip.id);
-      if (idx !== -1) {
-        URL.revokeObjectURL(clips[idx].url);
-        clips.splice(idx, 1);
-      }
-      clipCountEl.textContent = clips.length.toString();
-      btnExport.disabled = clips.length === 0;
-      renderClipList();
-    });
-
+    attachCommonControls();
     clipListEl.appendChild(item);
 
     // Initial paint for trim overlay
@@ -1028,6 +1319,26 @@ async function exportProject() {
     for (let i = 0; i < clips.length; i++) {
       statusEl.textContent = `Encoding clip ${i + 1}/${clips.length}…`;
       const clip = clips[i];
+
+      if (clip.type === 'title') {
+        serializedClips.push({
+          type: 'title',
+          id: clip.id,
+          title: clip.title,
+          duration: clip.duration,
+          trimStart: clip.trimStart || 0,
+          trimEnd: clip.trimEnd,
+          text: clip.text,
+          textColor: clip.textColor,
+          textSize: clip.textSize,
+          textAlign: clip.textAlign,
+          fontFamily: clip.fontFamily,
+          bgDataUrl: clip.bgDataUrl,
+          bgMimeType: clip.bgMimeType,
+          backgroundFit: clip.backgroundFit
+        });
+        continue;
+      }
       
       // Log original blob info
       const testBytes = new Uint8Array(await clip.blob.slice(0, 4).arrayBuffer());
@@ -1050,6 +1361,7 @@ async function exportProject() {
       });
 
       serializedClips.push({
+        type: clip.type || 'video',
         id: clip.id,
         title: clip.title,
         mimeType: clip.blob.type || 'video/webm',
@@ -1122,7 +1434,29 @@ async function importProjectFile(file) {
 
     for (let i = 0; i < data.clips.length; i++) {
       const entry = data.clips[i];
-      if (!entry || !entry.dataUrl) continue;
+      if (!entry) continue;
+
+      if (entry.type === 'title') {
+        statusEl.textContent = `Restoring title ${i + 1}/${data.clips.length}…`;
+        addTitleClip({
+          id: entry.id,
+          title: typeof entry.title === 'string' ? entry.title : undefined,
+          duration: Number.isFinite(entry.duration) ? entry.duration : 3,
+          trimStart: Number.isFinite(entry.trimStart) ? entry.trimStart : 0,
+          trimEnd: Number.isFinite(entry.trimEnd) ? entry.trimEnd : undefined,
+          text: typeof entry.text === 'string' ? entry.text : '',
+          textColor: typeof entry.textColor === 'string' ? entry.textColor : '#ffffff',
+          textSize: Number.isFinite(entry.textSize) ? entry.textSize : 48,
+          textAlign: typeof entry.textAlign === 'string' ? entry.textAlign : 'center',
+          fontFamily: typeof entry.fontFamily === 'string' ? entry.fontFamily : 'Inter, system-ui, sans-serif',
+          bgDataUrl: typeof entry.bgDataUrl === 'string' ? entry.bgDataUrl : null,
+          bgMimeType: typeof entry.bgMimeType === 'string' ? entry.bgMimeType : null,
+          backgroundFit: typeof entry.backgroundFit === 'string' ? entry.backgroundFit : 'cover'
+        });
+        continue;
+      }
+
+      if (!entry.dataUrl) continue;
       
       statusEl.textContent = `Restoring clip ${i + 1}/${data.clips.length}…`;
       let blob = await dataUrlToBlob(entry.dataUrl);
@@ -1237,12 +1571,49 @@ async function loadVideoMetadata(url) {
   });
 }
 
+function loadImageDimensions(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      resolve({
+        width: img.naturalWidth || img.width || 1280,
+        height: img.naturalHeight || img.height || 720
+      });
+    };
+    img.onerror = () => reject(new Error('Failed to load image'));
+    img.src = url;
+  });
+}
+
+function loadImageElement(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load image'));
+    img.src = url;
+  });
+}
+
 async function exportFinalVideo() {
   if (!clips.length) return;
   if (exportRecording) return;
 
   // Make sure durations + trimEnd are set
   for (const clip of clips) {
+    if (clip.type === 'title') {
+      if (!Number.isFinite(clip.duration)) {
+        clip.duration = Number.isFinite(clip.trimEnd) ? clip.trimEnd : 3;
+      }
+      if (!Number.isFinite(clip.trimStart)) clip.trimStart = 0;
+      if (!Number.isFinite(clip.trimEnd) || clip.trimEnd == null) {
+        clip.trimEnd = clip.duration;
+      }
+      if (clip.trimEnd <= clip.trimStart) {
+        clip.trimEnd = clip.trimStart + 0.05;
+      }
+      continue;
+    }
+
     if (!Number.isFinite(clip.duration)) {
       try {
         const meta = await loadVideoMetadata(clip.url);
@@ -1273,9 +1644,19 @@ async function exportFinalVideo() {
   let baseWidth = 1280;
   let baseHeight = 720;
   try {
-    const meta = await loadVideoMetadata(clips[0].url);
-    baseWidth = meta.width || baseWidth;
-    baseHeight = meta.height || baseHeight;
+    const firstVideo = clips.find(c => c.type !== 'title');
+    if (firstVideo) {
+      const meta = await loadVideoMetadata(firstVideo.url);
+      baseWidth = meta.width || baseWidth;
+      baseHeight = meta.height || baseHeight;
+    } else {
+      const firstTitleWithBg = clips.find(c => c.type === 'title' && c.bgDataUrl);
+      if (firstTitleWithBg) {
+        const imgMeta = await loadImageDimensions(firstTitleWithBg.bgDataUrl);
+        baseWidth = imgMeta.width || baseWidth;
+        baseHeight = imgMeta.height || baseHeight;
+      }
+    }
   } catch (_) {
     // keep defaults
   }
@@ -1307,7 +1688,41 @@ async function exportFinalVideo() {
     }
   };
 
-  const renderClip = clip => new Promise(async (resolve, reject) => {
+  const drawImageWithFit = (img, fit) => {
+    const iw = img.naturalWidth || img.width;
+    const ih = img.naturalHeight || img.height;
+    if (!iw || !ih) return;
+    const targetW = canvas.width;
+    const targetH = canvas.height;
+    const targetRatio = targetW / targetH;
+    const imgRatio = iw / ih;
+    let drawW = targetW;
+    let drawH = targetH;
+
+    if (fit === 'contain') {
+      if (imgRatio > targetRatio) {
+        drawW = targetW;
+        drawH = targetW / imgRatio;
+      } else {
+        drawH = targetH;
+        drawW = targetH * imgRatio;
+      }
+    } else {
+      if (imgRatio > targetRatio) {
+        drawH = targetH;
+        drawW = targetH * imgRatio;
+      } else {
+        drawW = targetW;
+        drawH = targetW / imgRatio;
+      }
+    }
+
+    const dx = (targetW - drawW) / 2;
+    const dy = (targetH - drawH) / 2;
+    ctx.drawImage(img, dx, dy, drawW, drawH);
+  };
+
+  const renderVideoClip = clip => new Promise(async (resolve, reject) => {
     const video = document.createElement('video');
     video.src = clip.url;
     video.muted = false;
@@ -1418,21 +1833,87 @@ async function exportFinalVideo() {
     };
   });
 
+  const renderTitleClip = clip => new Promise(async (resolve) => {
+    const duration = Number.isFinite(clip.duration)
+      ? clip.duration
+      : (Number.isFinite(clip.trimEnd) ? clip.trimEnd : 3);
+    const effectiveDuration = Math.max(0.1, duration);
+
+    let img = null;
+    if (clip.bgDataUrl) {
+      try {
+        img = await loadImageElement(clip.bgDataUrl);
+      } catch (_) {
+        img = null;
+      }
+    }
+
+    const lines = (clip.text || '').split('\n');
+    const fontSize = Number.isFinite(clip.textSize) ? clip.textSize : 48;
+    const fontFamily = clip.fontFamily || 'Inter, system-ui, sans-serif';
+    const align = ['left', 'center', 'right'].includes(clip.textAlign) ? clip.textAlign : 'center';
+    const color = clip.textColor || '#ffffff';
+    const lineHeight = fontSize * 1.2;
+    const startTime = performance.now();
+
+    const drawFrame = () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if (img && img.complete && img.naturalWidth) {
+        drawImageWithFit(img, clip.backgroundFit === 'contain' ? 'contain' : 'cover');
+      } else {
+        ctx.fillStyle = 'black';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      ctx.fillStyle = color;
+      ctx.textAlign = align;
+      ctx.textBaseline = 'middle';
+      ctx.font = `${fontSize}px ${fontFamily}`;
+
+      const totalHeight = lines.length * lineHeight;
+      const baseY = (canvas.height - totalHeight) / 2 + lineHeight / 2;
+      let x = canvas.width / 2;
+      if (align === 'left') x = 40;
+      if (align === 'right') x = canvas.width - 40;
+
+      lines.forEach((line, idx) => {
+        ctx.fillText(line, x, baseY + idx * lineHeight);
+      });
+    };
+
+    const tick = () => {
+      const elapsed = (performance.now() - startTime) / 1000;
+      drawFrame();
+      if (elapsed >= effectiveDuration) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+
+    drawFrame();
+    requestAnimationFrame(tick);
+  });
+
   try {
     // Diagnostics to understand clip inputs before rendering
     const diagnostics = [];
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
       let meta = { duration: clip.duration, width: null, height: null };
-      try {
-        const m = await loadVideoMetadata(clip.url);
-        meta = m;
-        clip.duration = Number.isFinite(m.duration) ? m.duration : clip.duration;
-        if (clip.trimEnd == null || !Number.isFinite(clip.trimEnd)) {
-          clip.trimEnd = clip.duration;
+      if (clip.type !== 'title') {
+        try {
+          const m = await loadVideoMetadata(clip.url);
+          meta = m;
+          clip.duration = Number.isFinite(m.duration) ? m.duration : clip.duration;
+          if (clip.trimEnd == null || !Number.isFinite(clip.trimEnd)) {
+            clip.trimEnd = clip.duration;
+          }
+        } catch (_) {
+          // ignore metadata fetch errors; keep whatever we have
         }
-      } catch (_) {
-        // ignore metadata fetch errors; keep whatever we have
+      } else if (clip.trimEnd == null || !Number.isFinite(clip.trimEnd)) {
+        clip.trimEnd = clip.duration;
       }
 
       const start = Math.max(0, Number.isFinite(clip.trimStart) ? clip.trimStart : 0);
@@ -1446,6 +1927,7 @@ async function exportFinalVideo() {
 
       diagnostics.push({
         index: i + 1,
+        type: clip.type || 'video',
         id: clip.id,
         trimStart: clip.trimStart,
         trimEnd: clip.trimEnd,
@@ -1457,7 +1939,8 @@ async function exportFinalVideo() {
         endRaw,
         effectiveEnd,
         hasEndGuard,
-        url: clip.url
+        url: clip.url,
+        hasBg: clip.bgDataUrl
       });
     }
 
@@ -1473,8 +1956,14 @@ async function exportFinalVideo() {
     recorder.start();
 
     for (let i = 0; i < clips.length; i++) {
-      statusEl.textContent = `Rendering clip ${i + 1}/${clips.length}…`;
-      await renderClip(clips[i]);
+      const clip = clips[i];
+      const label = clip.type === 'title' ? 'title block' : 'clip';
+      statusEl.textContent = `Rendering ${label} ${i + 1}/${clips.length}…`;
+      if (clip.type === 'title') {
+        await renderTitleClip(clip);
+      } else {
+        await renderVideoClip(clip);
+      }
     }
 
     statusEl.textContent = 'Finalizing recording…';
@@ -1520,6 +2009,28 @@ clipFileInput.addEventListener('change', () => {
     importClipFiles(clipFileInput.files);
   }
 });
+btnAddTitleClip.addEventListener('click', () => {
+  addTitleClip();
+});
+titleBgFileInput.addEventListener('change', async () => {
+  const targetId = pendingBgTargetId;
+  pendingBgTargetId = null;
+  const file = titleBgFileInput.files && titleBgFileInput.files[0];
+  titleBgFileInput.value = '';
+  if (!targetId || !file) return;
+  const clip = clips.find(c => c.id === targetId);
+  if (!clip || clip.type !== 'title') return;
+  try {
+    const dataUrl = await blobToDataUrl(file);
+    clip.bgDataUrl = dataUrl;
+    clip.bgMimeType = file.type || 'image/*';
+    renderClipList();
+    statusEl.textContent = 'Background image set for title block.';
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Failed to load background image: ' + err.message;
+  }
+});
 btnImportProject.addEventListener('click', () => {
   projectFileInput.value = '';
   projectFileInput.click();
@@ -1555,3 +2066,15 @@ setCaptureStatus('idle');
 updateRecordingIndicator();
 setWebcamPiPButtonState(false);
 updateAudioOffsetUI();
+
+detectAvailableFonts(fontDetectionCandidates).then(found => {
+  if (Array.isArray(found) && found.length) {
+    availableFontOptions = dedupeFontOptions([...baseFontOptions, ...found]);
+    // Refresh UI to show detected fonts
+    if (clips.length) {
+      renderClipList();
+    }
+  }
+}).catch(() => {
+  availableFontOptions = [...baseFontOptions];
+});
