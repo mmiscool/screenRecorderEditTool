@@ -1,6 +1,6 @@
 # screencap.me — Screen Recorder + Editor
 
-This repo is configured for the `screencap.me` CNAME and ships a no-nonsense browser app for grabbing your screen + microphone, optionally floating your webcam in Picture-in-Picture, chopping clips, and exporting one stitched video without touching FFmpeg or a backend.
+This repo contains a no-nonsense browser app for grabbing your screen + microphone, optionally floating your webcam in Picture-in-Picture, chopping clips, and exporting one stitched video without touching FFmpeg or a backend.
 
 ![App screenshot showing capture preview, clip list, and export controls](./screenshot.png)
 
