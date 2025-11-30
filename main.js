@@ -11,8 +11,10 @@ const clipListEl = document.getElementById('clipList');
 const clipCountEl = document.getElementById('clipCount');
 const statusEl = document.getElementById('status');
 const downloadLink = document.getElementById('downloadLink');
+const btnImportClip = document.getElementById('btnImportClip');
 const btnImportProject = document.getElementById('btnImportProject');
 const btnExportProject = document.getElementById('btnExportProject');
+const clipFileInput = document.getElementById('clipFileInput');
 const projectFileInput = document.getElementById('projectFileInput');
 const btnWebcamPiP = document.getElementById('btnWebcamPiP');
 const webcamPiPVideo = document.getElementById('webcamPiP');
@@ -958,6 +960,53 @@ function renderClipList() {
 }
 
 // -----------------------------
+// Clip import from local files
+// -----------------------------
+async function importClipFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+
+  let imported = 0;
+  let skipped = 0;
+
+  btnImportClip.disabled = true;
+  try {
+    statusEl.textContent = files.length === 1
+      ? `Importing clip: ${files[0].name}`
+      : `Importing ${files.length} clips…`;
+
+    for (const file of files) {
+      if (!file || !(file instanceof Blob)) {
+        skipped += 1;
+        continue;
+      }
+
+      if (file.type && !file.type.startsWith('video/')) {
+        skipped += 1;
+        continue;
+      }
+
+      addClip(file, { title: file.name });
+      imported += 1;
+    }
+
+    if (imported) {
+      const suffix = imported === 1 ? 'clip' : 'clips';
+      const skippedNote = skipped ? ` (${skipped} skipped)` : '';
+      statusEl.textContent = `Imported ${imported} ${suffix}${skippedNote}.`;
+    } else {
+      statusEl.textContent = 'No video clips were imported.';
+    }
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Clip import failed: ' + err.message;
+  } finally {
+    clipFileInput.value = '';
+    btnImportClip.disabled = false;
+  }
+}
+
+// -----------------------------
 // Project save/load
 // -----------------------------
 function resetDownloadLink() {
@@ -1462,6 +1511,15 @@ btnStartCapture.addEventListener('click', startCapture);
 btnStartRecording.addEventListener('click', startRecording);
 btnExport.addEventListener('click', exportFinalVideo);
 btnExportProject.addEventListener('click', exportProject);
+btnImportClip.addEventListener('click', () => {
+  clipFileInput.value = '';
+  clipFileInput.click();
+});
+clipFileInput.addEventListener('change', () => {
+  if (clipFileInput.files) {
+    importClipFiles(clipFileInput.files);
+  }
+});
 btnImportProject.addEventListener('click', () => {
   projectFileInput.value = '';
   projectFileInput.click();
