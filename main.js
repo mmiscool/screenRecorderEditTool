@@ -20,6 +20,7 @@ const btnAddTitleClip = document.getElementById('btnAddTitleClip');
 const titleBgFileInput = document.getElementById('titleBgFileInput');
 const btnWebcamPiP = document.getElementById('btnWebcamPiP');
 const webcamPiPVideo = document.getElementById('webcamPiP');
+const renderPiPVideo = document.getElementById('renderPiPVideo');
 const audioOffsetInput = document.getElementById('audioOffsetInput');
 const btnApplyAudioOffset = document.getElementById('btnApplyAudioOffset');
 const audioOffsetHint = document.getElementById('audioOffsetHint');
@@ -53,6 +54,10 @@ let activeRenderCancel = null;
 let renderStartTimeMs = 0;
 let renderTotalSeconds = 0;
 let renderPreviewCanvas = null;
+let renderWakeLock = null;
+let renderPiPWindow = null;
+let renderPiPCanvas = null;
+let renderPiPCtx = null;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 const PROJECT_MAGIC_BYTES = new Uint8Array([0x53, 0x52, 0x50, 0x31]); // "SRP1"
@@ -211,6 +216,129 @@ function hideRenderOverlay() {
   }
   resetRenderPreviewContainer();
   renderPreviewCanvas = null;
+}
+
+async function requestRenderWakeLock() {
+  if (!('wakeLock' in navigator) || typeof navigator.wakeLock?.request !== 'function') {
+    return null;
+  }
+  try {
+    const lock = await navigator.wakeLock.request('screen');
+    renderWakeLock = lock;
+    lock.addEventListener('release', () => {
+      if (renderWakeLock === lock) {
+        renderWakeLock = null;
+      }
+    });
+    return lock;
+  } catch (err) {
+    console.warn('Wake lock request failed', err);
+    return null;
+  }
+}
+
+async function releaseRenderWakeLock() {
+  if (!renderWakeLock) return;
+  try {
+    await renderWakeLock.release();
+  } catch (_) {
+    // ignore
+  } finally {
+    renderWakeLock = null;
+  }
+}
+
+function mirrorCanvasToPiP(sourceCanvas) {
+  if (!renderPiPCanvas || !renderPiPCtx || !sourceCanvas) return;
+  try {
+    if (renderPiPCanvas.width !== sourceCanvas.width || renderPiPCanvas.height !== sourceCanvas.height) {
+      renderPiPCanvas.width = sourceCanvas.width;
+      renderPiPCanvas.height = sourceCanvas.height;
+    }
+    renderPiPCtx.clearRect(0, 0, renderPiPCanvas.width, renderPiPCanvas.height);
+    renderPiPCtx.drawImage(sourceCanvas, 0, 0, renderPiPCanvas.width, renderPiPCanvas.height);
+  } catch (err) {
+    console.warn('Mirror to PiP failed', err);
+  }
+}
+
+async function startRenderPiP(stream, sourceCanvas) {
+  const tryDocumentPiP = async () => {
+    if (!('documentPictureInPicture' in window) || typeof window.documentPictureInPicture?.requestWindow !== 'function') {
+      return false;
+    }
+    try {
+      if (renderPiPWindow && !renderPiPWindow.closed && renderPiPCanvas && renderPiPCtx) {
+        mirrorCanvasToPiP(sourceCanvas);
+        return true;
+      }
+      renderPiPWindow = await window.documentPictureInPicture.requestWindow({
+        width: sourceCanvas?.width || 640,
+        height: sourceCanvas?.height || 360
+      });
+      const doc = renderPiPWindow.document;
+      doc.body.style.margin = '0';
+      doc.body.style.background = '#000';
+      renderPiPCanvas = doc.createElement('canvas');
+      renderPiPCanvas.width = sourceCanvas?.width || 640;
+      renderPiPCanvas.height = sourceCanvas?.height || 360;
+      renderPiPCtx = renderPiPCanvas.getContext('2d');
+      doc.body.appendChild(renderPiPCanvas);
+      renderPiPWindow.addEventListener('pagehide', () => {
+        renderPiPWindow = null;
+        renderPiPCanvas = null;
+        renderPiPCtx = null;
+      });
+      mirrorCanvasToPiP(sourceCanvas);
+      return true;
+    } catch (err) {
+      console.warn('Document PiP setup failed', err);
+      renderPiPWindow = null;
+      renderPiPCanvas = null;
+      renderPiPCtx = null;
+      return false;
+    }
+  };
+
+  const docPiPOk = await tryDocumentPiP();
+  if (docPiPOk) return true;
+
+  // Fallback to video PiP
+  if (!renderPiPVideo || !stream) return false;
+  try {
+    if (renderPiPVideo.srcObject !== stream) {
+      renderPiPVideo.srcObject = stream;
+    }
+    renderPiPVideo.muted = true;
+    await renderPiPVideo.play().catch(() => {});
+    if (document.pictureInPictureEnabled && document.pictureInPictureElement !== renderPiPVideo) {
+      await renderPiPVideo.requestPictureInPicture();
+      return true;
+    }
+  } catch (err) {
+    console.warn('Render video PiP setup failed', err);
+  }
+  return false;
+}
+
+async function stopRenderPiP() {
+  if (renderPiPWindow && !renderPiPWindow.closed) {
+    try { renderPiPWindow.close(); } catch (_) {}
+  }
+  renderPiPWindow = null;
+  renderPiPCanvas = null;
+  renderPiPCtx = null;
+
+  if (!renderPiPVideo) return;
+  try {
+    if (document.pictureInPictureElement === renderPiPVideo) {
+      await document.exitPictureInPicture();
+    }
+  } catch (err) {
+    console.warn('Render PiP exit failed', err);
+  }
+  try { renderPiPVideo.pause(); } catch (_) {}
+  renderPiPVideo.srcObject = null;
 }
 
 function formatEta(seconds) {
@@ -2199,6 +2327,7 @@ async function exportFinalVideo() {
   resetRenderPreviewContainer();
   showRenderOverlay(totalRenderSeconds);
   updateRenderProgressUI(0, 'Preparing renderer…');
+  requestRenderWakeLock().catch(() => {});
 
   const progressState = {
     totalSeconds: totalRenderSeconds,
@@ -2272,6 +2401,7 @@ async function exportFinalVideo() {
   const audioDest = audioCtx.createMediaStreamDestination();
 
   const canvasStream = canvas.captureStream(30);
+  startRenderPiP(canvasStream, canvas).catch(() => {});
   const mixedStream = new MediaStream([
     ...canvasStream.getVideoTracks(),
     ...audioDest.stream.getAudioTracks()
@@ -2374,6 +2504,7 @@ async function exportFinalVideo() {
           return;
         }
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        mirrorCanvasToPiP(canvas);
         if (typeof onProgress === 'function') {
           const elapsed = Math.max(0, Math.min(video.currentTime, effectiveEnd) - start);
           const safeElapsed = Number.isFinite(clipDuration) && clipDuration > 0
@@ -2456,10 +2587,12 @@ async function exportFinalVideo() {
     const lineHeight = fontSize * 1.2;
     const startTime = performance.now();
     let done = false;
+    let timeoutId = null;
 
     const finish = (err) => {
       if (done) return;
       done = true;
+      if (timeoutId) clearTimeout(timeoutId);
       if (!err && typeof onProgress === 'function') {
         onProgress(effectiveDuration);
       }
@@ -2493,6 +2626,22 @@ async function exportFinalVideo() {
       lines.forEach((line, idx) => {
         ctx.fillText(line, x, baseY + idx * lineHeight);
       });
+
+      mirrorCanvasToPiP(canvas);
+    };
+
+    // When the tab is hidden rAF can pause; fall back to a throttled timer so progress still advances.
+    const scheduleNext = () => {
+      if (done) return;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (document.visibilityState === 'hidden') {
+        timeoutId = setTimeout(tick, 500);
+      } else {
+        requestAnimationFrame(tick);
+      }
     };
 
     const tick = () => {
@@ -2510,11 +2659,11 @@ async function exportFinalVideo() {
         finish();
         return;
       }
-      requestAnimationFrame(tick);
+      scheduleNext();
     };
 
     drawFrame();
-    requestAnimationFrame(tick);
+    scheduleNext();
   });
 
   try {
@@ -2642,6 +2791,8 @@ async function exportFinalVideo() {
   } finally {
     exportRecording = false;
     btnExport.disabled = false;
+    await stopRenderPiP().catch(() => {});
+    await releaseRenderWakeLock().catch(() => {});
     hideRenderOverlay();
     canvasStream.getTracks().forEach(t => t.stop());
     mixedStream.getTracks().forEach(t => t.stop());
