@@ -53,6 +53,10 @@ let activeRenderCancel = null;
 let renderStartTimeMs = 0;
 let renderTotalSeconds = 0;
 let renderPreviewCanvas = null;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+const PROJECT_MAGIC_BYTES = new Uint8Array([0x53, 0x52, 0x50, 0x31]); // "SRP1"
+const PROJECT_CONTAINER_VERSION = 1;
 
 const baseFontOptions = [
   { label: 'Sans (Inter)', value: 'Inter, system-ui, sans-serif' },
@@ -1501,14 +1505,147 @@ function resetDownloadLink() {
   downloadLink.textContent = 'Download final webm';
 }
 
+function supportsProjectCompression() {
+  return typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+}
+
+function resetProjectStateForImport() {
+  revokeClipUrls();
+  clips.length = 0;
+  clipCountEl.textContent = '0';
+  btnExport.disabled = true;
+  resetDownloadLink();
+  renderClipList();
+  resetPreviewDimensionsCache();
+}
+
+function buildBinaryProjectMetadata() {
+  const serializedClips = [];
+  let dataOffset = 0;
+
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+
+    if (clip.type === 'title') {
+      serializedClips.push({
+        type: 'title',
+        id: clip.id,
+        title: clip.title,
+        duration: clip.duration,
+        trimStart: clip.trimStart || 0,
+        trimEnd: clip.trimEnd,
+        text: clip.text,
+        textColor: clip.textColor,
+        textSize: clip.textSize,
+        textAlign: clip.textAlign,
+        fontFamily: clip.fontFamily,
+        bgDataUrl: clip.bgDataUrl,
+        bgMimeType: clip.bgMimeType,
+        backgroundFit: clip.backgroundFit
+      });
+      continue;
+    }
+
+    const clipSize = clip.blob instanceof Blob ? clip.blob.size : 0;
+    serializedClips.push({
+      type: clip.type || 'video',
+      id: clip.id,
+      title: clip.title,
+      mimeType: clip.blob?.type || 'video/webm',
+      duration: clip.duration,
+      trimStart: Number.isFinite(clip.trimStart) ? clip.trimStart : 0,
+      trimEnd: Number.isFinite(clip.trimEnd) ? clip.trimEnd : null,
+      dataOffset: clipSize ? dataOffset : null,
+      dataLength: clipSize
+    });
+    dataOffset += clipSize;
+  }
+
+  return {
+    format: 'screen-recorder-project',
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    clipCount: serializedClips.length,
+    dataSectionBytes: dataOffset,
+    clips: serializedClips
+  };
+}
+
 async function exportProject() {
   if (!clips.length) {
     statusEl.textContent = 'No clips to export as a project.';
     return;
   }
 
+  if (supportsProjectCompression()) {
+    try {
+      await exportProjectGzip();
+      return;
+    } catch (err) {
+      console.error('Gzip export failed, falling back to JSON export.', err);
+      statusEl.textContent = 'Compressed export failed, trying JSON fallback…';
+    }
+  } else {
+    console.warn('CompressionStream/DecompressionStream not supported; using JSON export.');
+  }
+
+  await exportProjectLegacyJson();
+}
+
+async function exportProjectGzip() {
+  statusEl.textContent = 'Preparing gzip project export…';
+
+  const metadata = buildBinaryProjectMetadata();
+  const metadataBytes = textEncoder.encode(JSON.stringify(metadata));
+  const header = new Uint8Array(9);
+  header.set(PROJECT_MAGIC_BYTES, 0);
+  header[4] = PROJECT_CONTAINER_VERSION;
+  new DataView(header.buffer).setUint32(5, metadataBytes.length, true);
+
+  const videoClips = clips
+    .map((clip, index) => ({ clip, index }))
+    .filter(item => item.clip.type !== 'title' && item.clip.blob instanceof Blob);
+
+  const rawStream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(header);
+      controller.enqueue(metadataBytes);
+
+      for (let i = 0; i < videoClips.length; i++) {
+        const { clip, index } = videoClips[i];
+        statusEl.textContent = `Compressing clip ${i + 1}/${videoClips.length} (original index #${index + 1})…`;
+        const reader = clip.blob.stream().getReader();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength) {
+            controller.enqueue(value);
+          }
+        }
+      }
+      controller.close();
+    }
+  });
+
+  const compressedStream = rawStream.pipeThrough(new CompressionStream('gzip'));
+  statusEl.textContent = 'Finalizing compressed project…';
+  const fileBlob = await new Response(compressedStream).blob();
+  const url = URL.createObjectURL(fileBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'screen-recorder-project.srp.gz';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+
+  statusEl.textContent = 'Project exported.';
+}
+
+async function exportProjectLegacyJson() {
   try {
-    statusEl.textContent = 'Preparing project export…';
+    statusEl.textContent = 'Preparing project export (JSON fallback)…';
 
     const serializedClips = [];
     for (let i = 0; i < clips.length; i++) {
@@ -1600,40 +1737,122 @@ async function exportProject() {
   }
 }
 
+async function sniffIsGzipFile(file) {
+  try {
+    const head = new Uint8Array(await file.slice(0, 2).arrayBuffer());
+    return head[0] === 0x1f && head[1] === 0x8b;
+  } catch (_) {
+    return false;
+  }
+}
+
 async function importProjectFile(file) {
   if (!file) return;
   try {
-    statusEl.textContent = 'Loading project…';
-    const text = await file.text();
-    console.log('File text length:', text.length);
-    console.log('First 200 chars:', text.substring(0, 200));
-    
-    const data = JSON.parse(text);
-
-    if (!data || !Array.isArray(data.clips)) {
-      throw new Error('Invalid project file');
+    const isGzip = await sniffIsGzipFile(file);
+    if (isGzip) {
+      if (!supportsProjectCompression()) {
+        throw new Error('This browser cannot import compressed projects (CompressionStream unavailable).');
+      }
+      try {
+        await importProjectGzip(file);
+        return;
+      } catch (err) {
+        console.error('Compressed project import failed, falling back to JSON.', err);
+        statusEl.textContent = 'Compressed import failed, trying JSON…';
+      }
     }
-    
-    console.log('Parsed clips:', {
-      count: data.clips.length,
-      firstClipDataUrlLength: data.clips[0]?.dataUrl?.length,
-      firstClipDataUrlStart: data.clips[0]?.dataUrl?.substring(0, 100)
-    });
 
-    revokeClipUrls();
-    clips.length = 0;
-    clipCountEl.textContent = '0';
-    btnExport.disabled = true;
-    resetDownloadLink();
-    renderClipList();
-    resetPreviewDimensionsCache();
+    await importProjectJson(file);
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Project import failed: ' + err.message;
+  } finally {
+    projectFileInput.value = '';
+  }
+}
 
-    for (let i = 0; i < data.clips.length; i++) {
-      const entry = data.clips[i];
+async function importProjectGzip(file) {
+  statusEl.textContent = 'Decompressing project…';
+  const reader = file.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  let carry = null;
+
+  const carryMerged = (parts, totalLength) => {
+    if (parts.length === 1 && parts[0].length === totalLength) {
+      return parts[0];
+    }
+    const merged = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const part of parts) {
+      merged.set(part, offset);
+      offset += part.length;
+    }
+    return merged;
+  };
+
+  const readExact = async (length, { merge = false } = {}) => {
+    const parts = [];
+    let remaining = length;
+
+    const takeChunk = (chunk) => {
+      if (!chunk || !chunk.length) return;
+      if (chunk.length <= remaining) {
+        parts.push(chunk);
+        remaining -= chunk.length;
+      } else {
+        parts.push(chunk.subarray(0, remaining));
+        carry = chunk.subarray(remaining);
+        remaining = 0;
+      }
+    };
+
+    if (carry && carry.length) {
+      const prev = carry;
+      carry = null;
+      takeChunk(prev);
+      if (remaining === 0) {
+        return merge ? carryMerged(parts, length) : parts;
+      }
+    }
+
+    while (remaining > 0) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error('Unexpected end of compressed project data');
+      takeChunk(value);
+    }
+
+    return merge ? carryMerged(parts, length) : parts;
+  };
+
+  try {
+    const headerBytes = await readExact(9, { merge: true });
+    if (headerBytes.length < 9) {
+      throw new Error('Project file too small');
+    }
+    const magic = String.fromCharCode(...headerBytes.subarray(0, 4));
+    if (magic !== 'SRP1') {
+      throw new Error('Unsupported project container');
+    }
+    const version = headerBytes[4];
+    if (version !== PROJECT_CONTAINER_VERSION) {
+      console.warn('Project container version mismatch:', version);
+    }
+    const metaLength = new DataView(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength).getUint32(5, true);
+    const metadataBytes = metaLength ? await readExact(metaLength, { merge: true }) : new Uint8Array();
+    const metadata = JSON.parse(textDecoder.decode(metadataBytes));
+
+    if (!metadata || !Array.isArray(metadata.clips)) {
+      throw new Error('Invalid project metadata');
+    }
+
+    resetProjectStateForImport();
+
+    for (let i = 0; i < metadata.clips.length; i++) {
+      const entry = metadata.clips[i];
       if (!entry) continue;
 
       if (entry.type === 'title') {
-        statusEl.textContent = `Restoring title ${i + 1}/${data.clips.length}…`;
+        statusEl.textContent = `Restoring title ${i + 1}/${metadata.clips.length}…`;
         addTitleClip({
           id: entry.id,
           title: typeof entry.title === 'string' ? entry.title : undefined,
@@ -1652,28 +1871,16 @@ async function importProjectFile(file) {
         continue;
       }
 
-      if (!entry.dataUrl) continue;
-      
-      statusEl.textContent = `Restoring clip ${i + 1}/${data.clips.length}…`;
-      let blob = await dataUrlToBlob(entry.dataUrl);
-      
-      // Use the stored MIME type if available (preserves codec info)
-      if (entry.mimeType && entry.mimeType !== blob.type) {
-        blob = new Blob([blob], { type: entry.mimeType });
+      const dataLength = Number.isFinite(entry.dataLength) ? entry.dataLength : 0;
+      if (!dataLength) {
+        console.warn('Clip is missing data payload:', entry.id);
+        continue;
       }
-      
-      console.log('Imported clip blob:', {
-        index: i,
-        id: entry.id,
-        size: blob.size,
-        type: blob.type,
-        storedType: entry.mimeType
-      });
-      
-      // Test if blob is valid by checking first bytes
-      const testBytes = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
-      console.log('First 4 bytes of imported blob:', Array.from(testBytes).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
-      
+
+      statusEl.textContent = `Restoring clip ${i + 1}/${metadata.clips.length}…`;
+      const parts = await readExact(dataLength, { merge: false });
+      const blob = new Blob(parts, { type: entry.mimeType || 'video/webm' });
+
       addClip(blob, {
         id: entry.id,
         title: typeof entry.title === 'string' ? entry.title : undefined,
@@ -1684,12 +1891,87 @@ async function importProjectFile(file) {
     }
 
     statusEl.textContent = `Project imported with ${clips.length} clip${clips.length === 1 ? '' : 's'}.`;
-  } catch (err) {
-    console.error(err);
-    statusEl.textContent = 'Project import failed: ' + err.message;
   } finally {
-    projectFileInput.value = '';
+    try { reader.cancel(); } catch (_) {}
   }
+}
+
+async function importProjectJson(file) {
+  statusEl.textContent = 'Loading project…';
+  const text = await file.text();
+  console.log('File text length:', text.length);
+  console.log('First 200 chars:', text.substring(0, 200));
+  
+  const data = JSON.parse(text);
+
+  if (!data || !Array.isArray(data.clips)) {
+    throw new Error('Invalid project file');
+  }
+  
+  console.log('Parsed clips:', {
+    count: data.clips.length,
+    firstClipDataUrlLength: data.clips[0]?.dataUrl?.length,
+    firstClipDataUrlStart: data.clips[0]?.dataUrl?.substring(0, 100)
+  });
+
+  resetProjectStateForImport();
+
+  for (let i = 0; i < data.clips.length; i++) {
+    const entry = data.clips[i];
+    if (!entry) continue;
+
+    if (entry.type === 'title') {
+      statusEl.textContent = `Restoring title ${i + 1}/${data.clips.length}…`;
+      addTitleClip({
+        id: entry.id,
+        title: typeof entry.title === 'string' ? entry.title : undefined,
+        duration: Number.isFinite(entry.duration) ? entry.duration : 3,
+        trimStart: Number.isFinite(entry.trimStart) ? entry.trimStart : 0,
+        trimEnd: Number.isFinite(entry.trimEnd) ? entry.trimEnd : undefined,
+        text: typeof entry.text === 'string' ? entry.text : '',
+        textColor: typeof entry.textColor === 'string' ? entry.textColor : '#ffffff',
+        textSize: Number.isFinite(entry.textSize) ? entry.textSize : 48,
+        textAlign: typeof entry.textAlign === 'string' ? entry.textAlign : 'center',
+        fontFamily: typeof entry.fontFamily === 'string' ? entry.fontFamily : 'Inter, system-ui, sans-serif',
+        bgDataUrl: typeof entry.bgDataUrl === 'string' ? entry.bgDataUrl : null,
+        bgMimeType: typeof entry.bgMimeType === 'string' ? entry.bgMimeType : null,
+        backgroundFit: typeof entry.backgroundFit === 'string' ? entry.backgroundFit : 'cover'
+      });
+      continue;
+    }
+
+    if (!entry.dataUrl) continue;
+    
+    statusEl.textContent = `Restoring clip ${i + 1}/${data.clips.length}…`;
+    let blob = await dataUrlToBlob(entry.dataUrl);
+    
+    // Use the stored MIME type if available (preserves codec info)
+    if (entry.mimeType && entry.mimeType !== blob.type) {
+      blob = new Blob([blob], { type: entry.mimeType });
+    }
+    
+    console.log('Imported clip blob:', {
+      index: i,
+      id: entry.id,
+      size: blob.size,
+      type: blob.type,
+      storedType: entry.mimeType
+    });
+    
+    // Test if blob is valid by checking first bytes
+    const testBytes = new Uint8Array(await blob.slice(0, 4).arrayBuffer());
+    console.log('First 4 bytes of imported blob:', Array.from(testBytes).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+    
+    addClip(blob, {
+      id: entry.id,
+      title: typeof entry.title === 'string' ? entry.title : undefined,
+      duration: Number.isFinite(entry.duration) ? entry.duration : null,
+      trimStart: Number.isFinite(entry.trimStart) ? entry.trimStart : 0,
+      trimEnd: Number.isFinite(entry.trimEnd) ? entry.trimEnd : null
+    });
+  }
+
+  statusEl.textContent = `Project imported with ${clips.length} clip${clips.length === 1 ? '' : 's'}.`;
 }
 
 // -----------------------------

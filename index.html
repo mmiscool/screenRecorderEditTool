@@ -66,7 +66,12 @@
       </div>
       <div class="controls-right">
         <div class="toolbar-project-actions">
-          <input type="file" id="projectFileInput" accept="application/json" style="display: none;" />
+          <input
+            type="file"
+            id="projectFileInput"
+            accept=".json,.gz,.srp,.srp.gz,application/json,application/gzip"
+            style="display: none;"
+          />
           <button id="btnImportProject" class="secondary">Import Project</button>
           <button id="btnExportProject" class="secondary">Export Project</button>
         </div>
